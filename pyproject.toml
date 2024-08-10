@@ -1,6 +1,10 @@
 [tool.poetry]
-name = "NYC OpinionMine"
-version = "0.1.0"
+name = "Opinion Mine"
+packages = [
+    { include = "opinion_mine" },
+]
+
+version = "0.1.1"
 description = "This project aims to mine and analyze opinions from NYT comments to gain insights into public sentiment."
 authors = ["Chinedu Ezeofor <neidu@gmail.com>"]
 readme = "README.md"
