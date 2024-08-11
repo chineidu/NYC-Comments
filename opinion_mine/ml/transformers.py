@@ -369,6 +369,8 @@ class TFIDFTransformer(BaseEstimator, TransformerMixin):
     ----------
     feature : str
         The name of the feature column containing text data.
+    stop_words : str | list[str], default="english"
+        The stop words to use for TfidfVectorizer.
     max_df : float, default=1.0
         The maximum document frequency for TfidfVectorizer.
     min_df : int, default=1
@@ -385,14 +387,16 @@ class TFIDFTransformer(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         feature: str,
+        stop_words: str | list[str] = "english",
         max_df: float = 1.0,
         min_df: int = 1,
     ) -> None:
         self.feature: str = feature
+        self.stop_words: str | list[str] = stop_words
         self.max_df: float = max_df
         self.min_df: int = min_df
         self.tfidf: TfidfVectorizer = TfidfVectorizer(
-            stop_words="english", max_df=max_df, min_df=min_df
+            stop_words=stop_words, max_df=max_df, min_df=min_df
         )
 
     def fit(self, X: pd.DataFrame | pl.DataFrame, y: None = None) -> "TFIDFTransformer":
@@ -456,6 +460,8 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
         Number of components to keep in the SVD transformation.
     random_state : int, default=42
         Random state for reproducibility.
+    compute_explained_variance : bool, default=True
+        Whether to compute and store the explained variance ratio.
 
     Attributes
     ----------
@@ -465,6 +471,8 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
         List of feature names to include in SVD transformation.
     ignore_columns_ : list[str]
         List of feature names to exclude from SVD transformation.
+    explained_variance_ratio_ : ndarray of shape (n_components,)
+        The variance explained by each of the selected components.
     """
 
     def __init__(
@@ -473,6 +481,7 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
         include_pattern: str | None = None,
         n_components: int = 100,
         random_state: int = 42,
+        compute_explained_variance: bool = True,
     ) -> None:
         if exclude_features is None and include_pattern is None:
             raise ValueError("`exclude_features` and `include_pattern` cannot both be None")
@@ -487,6 +496,7 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
             self.include_pattern: str = include_pattern
         self.n_components: int = n_components
         self.random_state: int = random_state
+        self.compute_explained_variance: bool = compute_explained_variance
         self.svd: TruncatedSVD = TruncatedSVD(n_components=n_components, random_state=random_state)
 
     def fit(self, X: pd.DataFrame | pl.DataFrame, y: None = None) -> "SVDTransformer":
@@ -516,6 +526,8 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
             ]
             self.ignore_columns_ = sorted(set(X.columns) - set(self.features))
         self.svd.fit(X.select(self.features))
+        if self.compute_explained_variance:
+            self.explained_variance_ratio_: np.ndarray = self.svd.explained_variance_ratio_
         return self
 
     def transform(self, X: pd.DataFrame | pl.DataFrame) -> pl.DataFrame:
