@@ -122,6 +122,9 @@ class MyCorpus:
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filepath={self.filepath!r})"
 
+    def __len__(self) -> int:
+        return sum(1 for _ in open(self.filepath, "r"))
+
     def __iter__(self) -> Iterator[List[str]]:
         """
         Iterate over the corpus, yielding tokenized lines.
