@@ -6,6 +6,10 @@ from typing import Literal, Optional, Union
 import numpy as np
 import pandas as pd
 import polars as pl
+from gensim.corpora import Dictionary
+from gensim.matutils import Dense2Corpus, corpus2csc
+from gensim.models import LsiModel, TfidfModel
+from gensim.models.doc2vec import Doc2Vec
 from scipy.sparse import csr_matrix
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import TruncatedSVD
@@ -553,4 +557,267 @@ class SVDTransformer(BaseEstimator, TransformerMixin):
         )
         ignore_df: pl.DataFrame = X.select(self.ignore_columns_)
         df: pl.DataFrame = pl.concat([ignore_df, svd_df], how="horizontal")
+        return df
+
+
+class Doc2VecTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, model: Doc2Vec, text_col: str = "text") -> None:
+        self.model = model
+        self.text_col = text_col
+
+    def fit(
+        self,
+        X: Union[pl.DataFrame, pd.DataFrame],
+        y: Optional[Union[pl.DataFrame, pd.DataFrame]] = None,
+    ) -> "Doc2VecTransformer":
+        return self
+
+    def transform(self, X: pl.DataFrame) -> np.ndarray:
+        X_arr: np.ndarray = np.array(
+            [self.model.infer_vector(doc.split()) for doc in X[self.text_col].to_list()]
+        )
+        X_df: pl.DataFrame = pl.DataFrame(
+            X_arr, schema=[f"feat__{idx}" for idx in range(self.model.vector_size)]
+        )
+        ignore_df: pl.DataFrame = X.drop([self.text_col])
+        df: pl.DataFrame = pl.concat([ignore_df, X_df], how="horizontal")
+        return df
+
+
+class GensimTFIDFTransformer(BaseEstimator, TransformerMixin):
+    """
+    A transformer that applies TF-IDF transformation using Gensim.
+
+    Parameters
+    ----------
+    feature : str
+        The name of the column containing the text data.
+    min_token_freq : int, optional
+        The minimum frequency of tokens to be included, by default 2.
+    max_token_pct : float, optional
+        The maximum percentage of documents a token can appear in, by default 0.5.
+
+    Attributes
+    ----------
+    ignore_columns_ : list[str]
+        List of columns to ignore during transformation.
+    dictionary_ : Dictionary
+        Gensim Dictionary object.
+    tfidf_model_ : TfidfModel
+        Fitted TF-IDF model.
+    """
+
+    def __init__(self, feature: str, min_token_freq: int = 2, max_token_pct: float = 0.5) -> None:
+        self.feature = feature
+        self.min_token_freq = min_token_freq
+        self.max_token_pct = max_token_pct
+
+    def fit(self, X: pl.DataFrame | pd.DataFrame, y: None = None) -> "GensimTFIDFTransformer":
+        """
+        Fit the TF-IDF transformer to the input data.
+
+        Parameters
+        ----------
+        X : pl.DataFrame | pd.DataFrame, shape (n_samples, n_features)
+            Input DataFrame containing the text data.
+        y : None
+            Ignored. Kept for compatibility with scikit-learn API.
+
+        Returns
+        -------
+        GensimTFIDFTransformer
+            The fitted transformer.
+        """
+        if isinstance(X, pd.DataFrame):
+            X = pl.from_pandas(X)
+        self.ignore_columns_: list[str] = sorted(set(X.columns) - {self.feature})
+        processed_corpus: list[list[str]] = self._get_process_corpus(X)
+        self.dictionary_: Dictionary = Dictionary(processed_corpus)
+        # Filter low-freq and high-freq words
+        self.dictionary_.filter_extremes(no_below=self.min_token_freq, no_above=self.max_token_pct)
+        # Remove gaps in id sequence after words are filtered
+        self.dictionary_.compactify()
+        corpus_bow: list[list[tuple[int, int]]] = self._get_corpus_bow(
+            processed_corpus, self.dictionary_
+        )
+        self.tfidf_model_: TfidfModel = TfidfModel(corpus_bow)
+        return self
+
+    def transform(self, X: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
+        """
+        Transform the input data using the fitted TF-IDF transformer.
+
+        Parameters
+        ----------
+        X : pl.DataFrame | pd.DataFrame, shape (n_samples, n_features)
+            Input DataFrame containing the text data.
+
+        Returns
+        -------
+        pl.DataFrame, shape (n_samples, n_ignored_features + n_tfidf_features)
+            Transformed DataFrame with TF-IDF features.
+        """
+        processed_corpus: list[list[str]] = self._get_process_corpus(X)
+        corpus_bow: list[list[tuple[int, int]]] = self._get_corpus_bow(
+            processed_corpus, self.dictionary_
+        )
+        corpus_vector: list[list[tuple[int, float]]] = self.tfidf_model_[corpus_bow]
+        tfidf_matrix: csr_matrix = corpus2csc(corpus_vector, num_terms=len(self.dictionary_)).T
+        schema: list[str] = [f"tfidf__{s}" for s in list(self.dictionary_.values())]
+        tfidf_df: pl.DataFrame = pl.DataFrame(tfidf_matrix.toarray(), schema=schema)
+        ignore_df: pl.DataFrame = X.select(self.ignore_columns_)
+        df: pl.DataFrame = pl.concat([ignore_df, tfidf_df], how="horizontal")
+        return df
+
+    def _get_process_corpus(self, X: pl.DataFrame) -> list[list[str]]:
+        """
+        Process the input corpus by lowercasing and tokenizing.
+
+        Parameters
+        ----------
+        X : pl.DataFrame
+            Input DataFrame containing the text data.
+
+        Returns
+        -------
+        list[list[str]]
+            Processed corpus as a list of tokenized documents.
+        """
+        processed_corpus: list[list[str]] = [
+            doc.lower().split() for doc in X[self.feature].to_list()
+        ]
+        return processed_corpus
+
+    @staticmethod
+    def _get_corpus_bow(
+        processed_corpus: list[list[str]], dictionary: Dictionary
+    ) -> list[list[tuple[int, int]]]:
+        """
+        Convert the processed corpus to bag-of-words representation.
+
+        Parameters
+        ----------
+        processed_corpus : list[list[str]]
+            Processed corpus as a list of tokenized documents.
+        dictionary : Dictionary
+            Gensim Dictionary object.
+
+        Returns
+        -------
+        list[list[tuple[int, int]]]
+            Corpus in bag-of-words representation.
+        """
+        corpus_bow: list[list[tuple[int, int]]] = [
+            dictionary.doc2bow(text) for text in processed_corpus
+        ]
+        return corpus_bow
+
+
+class GensimLSITransformer(BaseEstimator, TransformerMixin):
+    """
+    A transformer that applies Latent Semantic Indexing (LSI) using Gensim.
+
+    Parameters
+    ----------
+    exclude_features : list[str] | None, optional
+        List of features to exclude from the transformation.
+    include_pattern : str | None, optional
+        Regular expression pattern to match features to include in the transformation.
+    num_topics : int, optional
+        Number of topics for LSI model. Default is 100.
+    random_state : int, optional
+        Random state for reproducibility. Default is 42.
+
+    Attributes
+    ----------
+    features : list[str]
+        List of features used for transformation.
+    ignore_columns_ : list[str]
+        List of columns to ignore during transformation.
+    lsi_model_ : LsiModel
+        Fitted LSI model.
+
+    Raises
+    ------
+    ValueError
+        If both `exclude_features` and `include_pattern` are None or not None.
+    """
+
+    def __init__(
+        self,
+        exclude_features: list[str] | None = None,
+        include_pattern: str | None = None,
+        num_topics: int = 100,
+        random_state: int = 42,
+    ) -> None:
+        if exclude_features is None and include_pattern is None:
+            raise ValueError("`exclude_features` and `include_pattern` cannot both be None")
+        if exclude_features is not None and include_pattern is not None:
+            raise ValueError("`exclude_features` and `include_pattern` cannot both be not None")
+        assert (
+            isinstance(exclude_features, list) or exclude_features is None
+        ), "`exclude_features` must be of type List"
+        self.exclude_features: list[str] | None = exclude_features
+        if include_pattern is not None:
+            assert isinstance(include_pattern, str), "`include_pattern` must be of type str"
+            self.include_pattern: str = include_pattern
+        self.num_topics: int = num_topics
+        self.random_state: int = random_state
+
+    def fit(self, X: pl.DataFrame, y=None) -> "GensimLSITransformer":
+        """
+        Fit the LSI model to the input data.
+
+        Parameters
+        ----------
+        X : pl.DataFrame
+            Input DataFrame containing the features.
+        y : None
+            Ignored. Kept for compatibility with scikit-learn API.
+
+        Returns
+        -------
+        GensimLSITransformer
+            Fitted transformer.
+        """
+        if isinstance(X, pd.DataFrame):
+            X = pl.from_pandas(X)
+        if self.exclude_features:
+            self.features: list[str] = list(set(X.columns) - set(self.exclude_features))
+            self.ignore_columns_: list[str] = self.exclude_features
+        elif hasattr(self, "include_pattern"):
+            self.features = [
+                col for col in X.columns if re.match(self.include_pattern, col, flags=re.IGNORECASE)
+            ]
+            self.ignore_columns_ = sorted(set(X.columns) - set(self.features))
+        corpus_tfidf: Dense2Corpus = Dense2Corpus(
+            X.select(self.features).to_numpy(), documents_columns=False
+        )
+        self.lsi_model_: LsiModel = LsiModel(corpus_tfidf, num_topics=self.num_topics)
+        return self
+
+    def transform(self, X: pl.DataFrame) -> pl.DataFrame:
+        """
+        Transform the input data using the fitted LSI model.
+
+        Parameters
+        ----------
+        X : pl.DataFrame
+            Input DataFrame containing the features.
+
+        Returns
+        -------
+        pl.DataFrame
+            Transformed DataFrame with LSI features and ignored columns.
+        """
+        corpus_tfidf: Dense2Corpus = Dense2Corpus(
+            X.select(self.features).to_numpy(), documents_columns=False
+        )
+        corpus_lsi: Dense2Corpus = self.lsi_model_[corpus_tfidf]
+        lsi_matrix: csr_matrix = corpus2csc(corpus_lsi, num_terms=self.num_topics).T
+        lsi_df: pl.DataFrame = pl.DataFrame(
+            lsi_matrix.toarray(), schema=[f"lsi__{s}" for s in range(self.num_topics)]
+        )
+        ignore_df: pl.DataFrame = X.select(self.ignore_columns_)
+        df: pl.DataFrame = pl.concat([ignore_df, lsi_df], how="horizontal")
         return df
